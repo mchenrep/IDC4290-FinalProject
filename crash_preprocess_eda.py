@@ -15,7 +15,7 @@ from scipy.stats import chi2_contingency, spearmanr, pointbiserialr
 
 # Use complete calendar years and exclude the incomplete current year.
 START = "2019-01-01"
-END_EXCLUSIVE = "2025-01-01"
+END_EXCLUSIVE = "2020-01-01"
 DATA_DIR = Path("data")
 NOAA_DIR = DATA_DIR / "noaa"
 BTS_DIR = DATA_DIR / "bts"
@@ -29,8 +29,7 @@ CRASH_FIELDS = [
     "first_crash_type", "most_severe_injury", "injuries_total", "injuries_fatal",
     "injuries_incapacitating", "injuries_non_incapacitating",
     "injuries_reported_not_evident", "injuries_no_indication", "damage",
-    "prim_contributory_cause", "traffic_control_device", "latitude", "longitude",
-    "zip_code", "beat_of_occurrence",
+    "prim_contributory_cause", "traffic_control_device", "latitude", "longitude", "beat_of_occurrence",
 ]
 LEAKAGE = {
     "most_severe_injury", "injuries_total", "injuries_fatal", "injuries_incapacitating",
@@ -223,8 +222,14 @@ def write_eda(crashes, panel):
             if len(valid) and valid[col].nunique() > 1:
                 categorical_rows.append({"feature": col, "cramers_v": cramers_v(valid[col], valid["severe"]), "n": len(valid)})
                 crashes.groupby(col, dropna=False)["severe"].agg(["count", "mean"]).rename(columns={"mean": "severe_rate"}).to_csv(OUT_DIR / f"severity_by_{col}.csv")
-    pd.DataFrame(numeric_rows).sort_values("point_biserial_r", key=lambda s: s.abs(), ascending=False).to_csv(OUT_DIR / "severity_numeric_associations.csv", index=False)
-    pd.DataFrame(categorical_rows).sort_values("cramers_v", ascending=False).to_csv(OUT_DIR / "severity_categorical_associations.csv", index=False)
+    if numeric_rows:
+        pd.DataFrame(numeric_rows).sort_values("point_biserial_r", key=lambda s: s.abs(), ascending=False).to_csv(OUT_DIR / "severity_numeric_associations.csv", index=False)
+    else:
+        print("No numeric severity associations computed (no eligible numeric columns).")
+    if categorical_rows:
+        pd.DataFrame(categorical_rows).sort_values("cramers_v", ascending=False).to_csv(OUT_DIR / "severity_categorical_associations.csv", index=False)
+    else:
+        print("No categorical severity associations computed (no eligible categorical columns).")
 
     # Crash occurrence associations use all hours, including hours with zero crashes.
     count_rows = []
@@ -235,7 +240,10 @@ def write_eda(crashes, panel):
         if len(valid) > 2 and valid[col].nunique() > 1:
             r, p = spearmanr(valid[col], valid["crash_count"])
             count_rows.append({"feature": col, "spearman_r": r, "p_value": p, "n_hours": len(valid)})
-    pd.DataFrame(count_rows).sort_values("spearman_r", key=lambda s: s.abs(), ascending=False).to_csv(OUT_DIR / "hourly_crash_count_associations.csv", index=False)
+    if count_rows:
+        pd.DataFrame(count_rows).sort_values("spearman_r", key=lambda s: s.abs(), ascending=False).to_csv(OUT_DIR / "hourly_crash_count_associations.csv", index=False)
+    else:
+        print("No hourly crash-count associations computed — add NOAA/BTS CSVs to data/noaa and data/bts to enable this.")
     panel.to_csv(OUT_DIR / "hourly_crash_weather_flights.csv", index=False)
     crashes.to_csv(OUT_DIR / "cleaned_crashes.csv", index=False)
     crashes.groupby([crashes["crash_date"].dt.year, crashes["hour_of_day"]]).size().rename("crash_count").to_csv(OUT_DIR / "crashes_by_year_hour.csv")
