@@ -1,9 +1,10 @@
-# Chicago Traffic Crash Data: Preprocessing and EDA
+# Chicago Traffic Crash Data: Preprocessing, EDA, and Modeling
 
-This repository contains a starter pipeline for **Steps 1–2** of the project:
+This repository contains a starter pipeline for **Steps 1–3** of the project:
 
 1. Download and clean Chicago traffic-crash records, then optionally combine them with hourly weather and flight data.
 2. Explore associations with crash occurrence and severe crashes to help decide which features or datasets to carry into modeling.
+3. Train and evaluate models that predict whether a crash is severe
 
 The pipeline covers **January 1, 2019 through December 31, 2024**. Crash data is downloaded directly from the City of Chicago data API. NOAA weather and BTS flight data are optional local CSV inputs.
 
@@ -22,6 +23,7 @@ Clone the repository, then place the script and data in this layout:
 ```text
 repository/
 ├── crash_preprocess_eda.py
+|-- model_severity.py
 ├── data/
 │   ├── noaa/       # NOAA hourly LCD CSV files (optional)
 │   └── bts/        # BTS monthly On-Time Performance CSV files (optional)
@@ -50,6 +52,7 @@ Install packages and run the pipeline:
 python -m pip install --upgrade pip
 python -m pip install pandas numpy scipy requests
 python crash_preprocess_eda.py
+python model_severity.py
 ```
 
 Run the command from the repository root so the script finds `data/` and writes to `output/` as expected.
