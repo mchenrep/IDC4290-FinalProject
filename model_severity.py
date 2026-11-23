@@ -22,7 +22,7 @@ RANDOM_STATE = 42
 # Time-ordered split
 # Train on the earliest data, tune the threshold on the middle, report final numbers on the latest.
 # VAL_START = "2023-01-01", TEST_START = "2024-01-01".
-VAL_START, TEST_START = "2019-09-01", "2019-11-01"
+VAL_START, TEST_START = "2023-01-01", "2024-01-01"
 
 # Feature sets 
 SCENE_CAT = ["weather_condition", "lighting_condition", "roadway_surface_cond", "trafficway_type",
@@ -31,7 +31,7 @@ SCENE_NUM = ["posted_speed_limit", "latitude", "longitude", "hour_sin", "hour_co
 POST_CAT = ["damage", "prim_contributory_cause"]
 
 def load():
-    df = pd.read_csv(OUT_DIR / "cleaned_crashes.csv", parse_dates=["crash_date"], low_memory=False)
+    df = pd.read_csv(OUT_DIR / "cleaned_crashes.csv.gz", parse_dates=["crash_date"], low_memory=False)
     df = df.sort_values("crash_date").reset_index(drop=True)
     # Hour of day is cyclic (23:00 is next to 00:00), so encode it on a circle.
     ang = 2 * np.pi * df["hour_of_day"] / 24
