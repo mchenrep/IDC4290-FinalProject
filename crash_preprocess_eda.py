@@ -1,27 +1,24 @@
-"""Preprocessing + EDA starter for the Chicago crash project.
+"""Step 1-2: download + clean Chicago crashes, add optional NOAA weather and BTS flight data, run EDA screening.
 
-Suggested local structure:
-  data/noaa/*.csv   NOAA hourly station CSVs (one or more years)
-  data/bts/*.csv    BTS On-Time Performance monthly CSV exports
+Inputs (all optional except the crash download):
+  data/noaa/*.csv   NOAA hourly Local Climatological Data (LCD) CSVs
+  data/bts/*.csv    BTS On-Time Performance CSVs (monthly exports)
+Crash months are downloaded from the City API once and cached in data/crash_cache/.
 
-Downloads Chicago Traffic Crashes from the City API. Output files go to output/.
+Outputs go to output/ (see README).
 """
+from datetime import timezone, timedelta
 from pathlib import Path
-import re
-import requests
+
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2_contingency, spearmanr, pointbiserialr
+import requests
+from scipy.stats import chi2_contingency, pointbiserialr, spearmanr
 
-# Use complete calendar years and exclude the incomplete current year.
-START = "2019-01-01"
-END_EXCLUSIVE = "2025-01-01"
-DATA_DIR = Path("data")
-NOAA_DIR = DATA_DIR / "noaa"
-BTS_DIR = DATA_DIR / "bts"
-OUT_DIR = Path("output")
-CACHE_DIR = DATA_DIR / "crash_cache"
-FORCE_REFRESH = False
+from config import (BTS_DIR, CACHE_DIR, END_EXCLUSIVE, NOAA_DIR, NOAA_TIMES_ARE_LOCAL_STANDARD, OUT_DIR, START,
+                    TRAIN_END)
+from features import OUTCOME_COLS, add_location_features, add_time_features
+
 CRASH_API = "https://data.cityofchicago.org/resource/85ca-t3if.json"
 PAGE_SIZE = 50_000
 
@@ -33,23 +30,33 @@ CRASH_FIELDS = [
     "injuries_reported_not_evident", "injuries_no_indication", "damage",
     "prim_contributory_cause", "traffic_control_device", "latitude", "longitude", "beat_of_occurrence",
 ]
-LEAKAGE = {
-    "most_severe_injury", "injuries_total", "injuries_fatal", "injuries_incapacitating",
-    "injuries_non_incapacitating", "injuries_reported_not_evident",
-    "injuries_no_indication", "severe",
-}
+CATEGORICAL_TO_CLEAN = ["weather_condition", "lighting_condition", "roadway_surface_cond", "trafficway_type",
+                        "alignment", "first_crash_type", "damage", "prim_contributory_cause", "traffic_control_device"]
+# Exact injury categories. NOTE: do NOT use a substring match on "INCAPACITATING":
+# "NONINCAPACITATING INJURY" contains it, which wrongly labeled ~9% of crashes as severe in the first version.
+SEVERE_LEVELS = {"FATAL", "INCAPACITATING INJURY"}
+ANY_INJURY_LEVELS = SEVERE_LEVELS | {"NONINCAPACITATING INJURY", "REPORTED, NOT EVIDENT"}
+
+pre_log = []
 
 
-def fetch_month(month_start, month_end):
-    """Download one month from the City API (same paging loop as before)."""
-    where = (
-        f"crash_date >= '{month_start:%Y-%m-%dT%H:%M:%S}' "
-        f"AND crash_date < '{month_end:%Y-%m-%dT%H:%M:%S}'"
-    )
+def log(step, df, note=""):
+    pre_log.append({"step": step, "rows": len(df), "note": note})
+    print(f"[{step}] rows={len(df):,} {note}")
+
+
+# ---------------------------------------------------------------- crashes: download (with cache)
+def _month_cache_path(month_start):
+    return CACHE_DIR / f"crashes_{month_start:%Y_%m}.csv"
+
+
+def _fetch_month(month_start, month_end):
+    where = (f"crash_date >= '{month_start:%Y-%m-%dT%H:%M:%S}' "
+             f"AND crash_date < '{month_end:%Y-%m-%dT%H:%M:%S}'")
     frames, offset = [], 0
     while True:
         params = {"$select": ",".join(CRASH_FIELDS), "$where": where,
-                  "$limit": PAGE_SIZE, "$offset": offset}
+                  "$order": "crash_record_id", "$limit": PAGE_SIZE, "$offset": offset}
         response = requests.get(CRASH_API, params=params, timeout=120)
         response.raise_for_status()
         batch = response.json()
@@ -59,11 +66,13 @@ def fetch_month(month_start, month_end):
         offset += len(batch)
         if len(batch) < PAGE_SIZE:
             break
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not frames:
+        return pd.DataFrame(columns=CRASH_FIELDS)
+    return pd.concat(frames, ignore_index=True).reindex(columns=CRASH_FIELDS)
 
 
 def download_crashes(start=START, end_exclusive=END_EXCLUSIVE):
-    """Load each month from the local cache if present, otherwise download and cache it."""
+    """Fetch crash rows month by month. Finished months are cached on disk, so re-runs are fast and offline."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end_exclusive)
     frames = []
@@ -71,42 +80,68 @@ def download_crashes(start=START, end_exclusive=END_EXCLUSIVE):
         if month_start >= end_ts:
             break
         month_end = min(month_start + pd.offsets.MonthBegin(1), end_ts)
-        path = CACHE_DIR / f"crashes_{month_start:%Y_%m}.csv"
-        if path.exists() and not FORCE_REFRESH:
-            df = pd.read_csv(path, dtype=str)
+        cache = _month_cache_path(month_start)
+        if cache.exists() and set(CRASH_FIELDS) <= set(pd.read_csv(cache, nrows=0).columns):
+            frames.append(pd.read_csv(cache, low_memory=False))
             print(f"Cached  {month_start:%Y-%m}")
-        else:
-            df = fetch_month(month_start, month_end)
-            if not df.empty:
-                tmp = path.with_suffix(".tmp")
-                df.to_csv(tmp, index=False)
-                tmp.replace(path)
-            print(f"Fetched {month_start:%Y-%m}")
-        frames.append(df)
-    frames = [f for f in frames if not f.empty]
+            continue
+        month = _fetch_month(month_start, month_end)
+        if month_end <= pd.Timestamp.now().normalize():      # only cache months that are complete
+            month.to_csv(cache, index=False)
+        frames.append(month)
+        print(f"Fetched {month_start:%Y-%m}")
     if not frames:
         raise RuntimeError("No crash records returned. Check the date range/API connection.")
     return pd.concat(frames, ignore_index=True)
 
 
-def clean_crashes(raw):
-    df = raw.copy()
-    df["crash_date"] = pd.to_datetime(df["crash_date"], errors="coerce")
-    df = df.dropna(subset=["crash_date"])
-    df = df.drop_duplicates(subset=["crash_record_id"])
-    df = df[df["crash_date"].between(START, pd.Timestamp(END_EXCLUSIVE) - pd.Timedelta(seconds=1))]
-    df["hour"] = df["crash_date"].dt.floor("h")
-    injury = df["most_severe_injury"].fillna("").str.upper()
-    df["severe"] = injury.str.contains("FATAL|INCAPACITATING", regex=True).astype("int8")
-    df["hour_of_day"] = df["crash_date"].dt.hour
-    df["day_of_week"] = df["crash_date"].dt.day_name()
-    df["month"] = df["crash_date"].dt.month
-    for col in ["latitude", "longitude", "posted_speed_limit", "injuries_total"]:
-        if col in df:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+# ---------------------------------------------------------------- crashes: clean
+def clean_cat(s):
+    return s.astype("string").str.strip().str.upper().fillna("UNKNOWN").replace({"": "UNKNOWN"})
+
+
+def build_severity(df):
+    """Target = fatal or incapacitating injury (exact category match). Also adds a 3-level class and an any-injury flag."""
+    injury = df["most_severe_injury"].astype("string").str.strip().str.upper()
+    df["severe"] = injury.isin(SEVERE_LEVELS).astype("int8")
+    df["any_injury"] = injury.isin(ANY_INJURY_LEVELS).astype("int8")
+    df["severity_class"] = np.select([df["severe"] == 1, df["any_injury"] == 1], [2, 1], default=0).astype("int8")
+    # cross-check against the injury counts: both definitions should agree
+    fatal = pd.to_numeric(df.get("injuries_fatal"), errors="coerce").fillna(0)
+    incap = pd.to_numeric(df.get("injuries_incapacitating"), errors="coerce").fillna(0)
+    mismatch = int(((fatal + incap > 0) != (df["severe"] == 1)).sum())
+    print(f"Severity check: label vs injury counts disagree on {mismatch:,} rows "
+          f"({mismatch / max(len(df), 1):.3%}); missing most_severe_injury on {int(injury.isna().sum()):,} rows (treated as not severe)")
     return df
 
 
+def clean_crashes(raw):
+    df = raw.copy()
+    log("1. crashes loaded", df)
+    df["crash_date"] = pd.to_datetime(df["crash_date"], errors="coerce")
+    df = df.dropna(subset=["crash_date"])
+    n = len(df)
+    df = df.drop_duplicates(subset=["crash_record_id"])
+    log("2. duplicates removed", df, f"({n - len(df):,} removed)")
+    df = df[df["crash_date"].between(START, pd.Timestamp(END_EXCLUSIVE) - pd.Timedelta(seconds=1))].copy()
+    log("3. date range applied", df, f"({START} to {END_EXCLUSIVE})")
+    df["hour"] = df["crash_date"].dt.floor("h")
+    df = build_severity(df)
+    for col in ["posted_speed_limit", "injuries_total"]:
+        if col in df:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    bad_speed = ~df["posted_speed_limit"].between(5, 70)
+    print(f"{int(bad_speed.sum()):,} impossible speed limits set to missing")
+    df.loc[bad_speed, "posted_speed_limit"] = np.nan
+    for col in CATEGORICAL_TO_CLEAN:
+        df[col] = clean_cat(df[col])
+    df = add_time_features(df)
+    df = add_location_features(df)
+    log("4. features built", df, f"({int(df['latitude'].isna().sum()):,} rows have missing/invalid coordinates, kept)")
+    return df.sort_values("crash_date").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------- weather and flights
 def first_existing(columns, candidates):
     lookup = {str(c).strip().lower(): c for c in columns}
     for candidate in candidates:
@@ -115,17 +150,19 @@ def first_existing(columns, candidates):
     return None
 
 
-def parse_noaa_hour(value):
-    """Parse NOAA LCD DATE values (typically local date + hour/minute)."""
-    if pd.isna(value):
-        return pd.NaT
-    text = str(value).strip()
-    # LCD hourly rows can encode the hour as HH:MM or as a timestamp.
-    ts = pd.to_datetime(text, errors="coerce")
-    return ts.floor("h") if not pd.isna(ts) else pd.NaT
+def noaa_number(series):
+    """NOAA numbers can carry letters ('0.05s'); 'T' means trace precipitation."""
+    s = series.astype("string").str.strip().replace({"T": "0.005"})
+    return pd.to_numeric(s.str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce")
 
 
-def read_noaa(folder=NOAA_DIR):
+def lst_to_clock(ts):
+    """Treat naive timestamps as Central STANDARD time (UTC-6 all year) and return Chicago wall-clock time."""
+    aware = ts.dt.tz_localize(timezone(timedelta(hours=-6)))
+    return aware.dt.tz_convert("America/Chicago").dt.tz_localize(None)
+
+
+def read_noaa(folder=NOAA_DIR, to_clock=NOAA_TIMES_ARE_LOCAL_STANDARD):
     files = sorted(Path(folder).glob("*.csv"))
     if not files:
         print("No NOAA CSVs found; continuing without weather features.")
@@ -137,41 +174,30 @@ def read_noaa(folder=NOAA_DIR):
         if date_col is None:
             raise ValueError(f"No DATE column found in NOAA file: {file}")
         ts = pd.to_datetime(d[date_col], errors="coerce")
-        # Etc/GMT+6 is a fixed UTC-6 zone (Chicago standard time, never shifting for DST)
-        ts = ts.dt.tz_localize("Etc/GMT+6").dt.tz_convert("America/Chicago").dt.tz_localize(None)
-        out = pd.DataFrame({"hour": ts.dt.floor("h")})
-        mapping = {
-            "temp_f": ["HourlyDryBulbTemperature"],
-            "precip_in": ["HourlyPrecipitation"],
-            "wind_mph": ["HourlyWindSpeed"],
-            "visibility_mi": ["HourlyVisibility"],
-        }
+        if getattr(ts.dt, "tz", None) is not None:
+            ts = ts.dt.tz_localize(None)
+        hour = ts.dt.floor("h")
+        out = pd.DataFrame({"hour": lst_to_clock(hour) if to_clock else hour})
+        mapping = {"temp_f": ["HourlyDryBulbTemperature"], "precip_in": ["HourlyPrecipitation"],
+                   "wind_mph": ["HourlyWindSpeed"], "visibility_mi": ["HourlyVisibility"]}
         for name, candidates in mapping.items():
             col = first_existing(d.columns, candidates)
             if col:
-                # NOAA may encode missing observations with tokens such as T or blank.
-                out[name] = pd.to_numeric(d[col].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce")
-        if "temp_f" in out:        
-            out["temp_f"] = out["temp_f"] * 9 / 5 + 32
-        if "precip_in" in out:     
-            out["precip_in"] = out["precip_in"] / 25.4
-        if "wind_mph" in out:      
-            out["wind_mph"] = out["wind_mph"] * 2.23694
-        if "visibility_mi" in out: 
-            out["visibility_mi"] = out["visibility_mi"] * 0.621371
-        condition_col = first_existing(d.columns, ["HourlyPresentWeatherType", "HourlySkyConditions"])
-        if condition_col:
-            out["weather_text"] = d[condition_col].astype("string")
+                out[name] = noaa_number(d[col])
+        present = first_existing(d.columns, ["HourlyPresentWeatherType"])
+        if present:
+            t = d[present].astype("string").str.upper().fillna("")
+            out["wx_rain"] = t.str.contains(r"RA|DZ").astype(int)
+            out["wx_snow"] = t.str.contains(r"SN|SG|PL|IC").astype(int)
+            out["wx_fog"] = t.str.contains(r"FG|BR").astype(int)
+            out["wx_freezing"] = t.str.contains(r"FZ").astype(int)
         parts.append(out)
     wx = pd.concat(parts, ignore_index=True).dropna(subset=["hour"])
     wx = wx[(wx["hour"] >= pd.Timestamp(START)) & (wx["hour"] < pd.Timestamp(END_EXCLUSIVE))]
-    # If multiple station files are supplied, average numeric readings per hour.
-    numeric = [c for c in wx.select_dtypes(include="number").columns if c != "hour"]
-    agg = {c: "mean" for c in numeric}
-    if "weather_text" in wx:
-        agg["weather_text"] = lambda s: s.mode().iat[0] if not s.mode().empty else pd.NA
+    flags = [c for c in wx.columns if c.startswith("wx_")]
+    numeric = [c for c in ["temp_f", "precip_in", "wind_mph", "visibility_mi"] if c in wx]
+    agg = {**{c: "mean" for c in numeric}, **{c: "max" for c in flags}}   # several readings/stations per hour
     return wx.groupby("hour", as_index=False).agg(agg)
-
 
 
 def read_bts(folder=BTS_DIR):
@@ -179,82 +205,54 @@ def read_bts(folder=BTS_DIR):
     if not files:
         print("No BTS CSVs found; continuing without flight features.")
         return None
-    print(f"\nBTS CSV files found: {len(files)}")
-    parts = []
-    for file in files:
-        d = pd.read_csv(file, low_memory=False)
-        parts.append(d)
-    flights = pd.concat(parts, ignore_index=True)
+    flights = pd.concat([pd.read_csv(f, low_memory=False) for f in files], ignore_index=True)
     origin = first_existing(flights.columns, ["Origin", "ORIGIN"])
-    date_col = first_existing(
-        flights.columns, ["FlightDate", "FL_DATE", "Flight Date"])
-    scheduled = first_existing(
-        flights.columns, ["CRSDepTime", "CRS_DEP_TIME",
-                          "Scheduled departure time"])
-    delay = first_existing(
-        flights.columns, ["DepDelay", "DEP_DELAY", "Departure delay"])
-    cancelled = first_existing(
-        flights.columns, ["Cancelled", "CANCELLED", "Cancelled flag"])
+    date_col = first_existing(flights.columns, ["FlightDate", "FL_DATE", "Flight Date"])
+    scheduled = first_existing(flights.columns, ["CRSDepTime", "CRS_DEP_TIME", "Scheduled departure time"])
+    delay = first_existing(flights.columns, ["DepDelay", "DEP_DELAY", "Departure delay"])
+    cancelled = first_existing(flights.columns, ["Cancelled", "CANCELLED", "Cancelled flag"])
     if not all([origin, date_col, scheduled]):
-        raise ValueError(
-            "BTS files need Origin, flight date, and scheduled departure-time columns.")
-    print("BTS columns:", flights.columns.tolist())
-    print("Date column:", date_col)
-    print("Scheduled time column:", scheduled)
-    print("Origin column:", origin)
-    print("Sample flight dates:")
-    print(flights[date_col].head(10).to_list())
-    # Keep flights originating at Chicago O'Hare.
-    flights = flights[
-        flights[origin].astype(str).str.strip().str.upper().eq("ORD")].copy()
-    print("Flights originating at ORD:", len(flights))
-    # Parse the date without assuming a particular format.
+        raise ValueError("BTS files need Origin, flight date, and scheduled departure-time columns.")
+    flights = flights[flights[origin].astype(str).str.upper().eq("ORD")].copy()
     dates = pd.to_datetime(flights[date_col], errors="coerce")
-    print("Successfully parsed dates:", dates.notna().sum())
-    print("Unparsed dates:", dates.isna().sum())
-    # Convert scheduled departure times to numeric HHMM.
-    hhmm = pd.to_numeric(flights[scheduled], errors="coerce")
-    # Handle 2400 as midnight on the following day.
-    midnight_next_day = hhmm.eq(2400)
-    hhmm = hhmm.mask(midnight_next_day, 0)
-    hhmm = hhmm.fillna(-1).astype(int)
-    hour = hhmm // 100
-    minute = hhmm % 100
-    valid = (hour.between(0, 23) & minute.between(0, 59) & dates.notna())
-    print("Flights with valid date/time:", valid.sum())
-    flights = flights.loc[valid].copy()
-    dates = dates.loc[valid]
-    hhmm = hhmm.loc[valid]
-    midnight_next_day = midnight_next_day.loc[valid]
-    flights["hour"] = (
-        dates.dt.normalize()
-        + pd.to_timedelta(hhmm // 100, unit="h")
-        + pd.to_timedelta(hhmm % 100, unit="m")
-        + pd.to_timedelta(midnight_next_day.astype(int), unit="D")
-    ).dt.floor("h")
-    flights = flights[
-        (flights["hour"] >= pd.Timestamp(START))
-        & (flights["hour"] < pd.Timestamp(END_EXCLUSIVE))].copy()
-    print("Flights remaining in project date range:", len(flights))
+    hhmm = pd.to_numeric(flights[scheduled], errors="coerce").fillna(-1).astype(int)
+    valid = (hhmm // 100).between(0, 24) & (hhmm % 100).between(0, 59) & dates.notna()
+    flights, dates, hhmm = flights.loc[valid].copy(), dates.loc[valid], hhmm.loc[valid]
+    flights["hour"] = (dates.dt.normalize() + pd.to_timedelta(hhmm // 100, unit="h")).dt.floor("h")   # 2400 -> next-day 00:00
+    flights = flights[(flights["hour"] >= pd.Timestamp(START)) & (flights["hour"] < pd.Timestamp(END_EXCLUSIVE))]
     if flights.empty:
-        raise ValueError(
-            "No valid ORD flights remain. Check the BTS date and scheduled-time formats.")
-    if delay:
-        flights["dep_delay_min"] = pd.to_numeric(
-            flights[delay], errors="coerce")
-    if cancelled:
-        flights["cancelled_flag"] = pd.to_numeric(
-            flights[cancelled], errors="coerce").fillna(0)
-    agg = {"flight_departures": (origin, "size")}
-    if "dep_delay_min" in flights:
-        agg["mean_dep_delay_min"] = ("dep_delay_min", "mean")
-    if "cancelled_flag" in flights:
-        agg["cancelled_flights"] = ("cancelled_flag", "sum")
-    result = flights.groupby("hour", as_index=False).agg(**agg)
-    print("Hourly BTS records generated:", len(result))
-    print(result.head())
-    return result
+        print("No ORD departures in the configured date range; continuing without flight features.")
+        return None
+    flights["dep_delay_min"] = pd.to_numeric(flights[delay], errors="coerce") if delay else np.nan
+    flights["cancelled_flag"] = pd.to_numeric(flights[cancelled], errors="coerce").fillna(0) if cancelled else 0
+    hourly = flights.groupby("hour").agg(flight_departures=(origin, "size"),
+                                         mean_dep_delay_min=("dep_delay_min", "mean"),
+                                         cancelled_flights=("cancelled_flag", "sum"))
+    # hours inside the covered period with no departures are real zeros (not missing)
+    full = pd.date_range(hourly.index.min(), hourly.index.max(), freq="h")
+    hourly = hourly.reindex(full)
+    hourly[["flight_departures", "cancelled_flights"]] = hourly[["flight_departures", "cancelled_flights"]].fillna(0)
+    return hourly.rename_axis("hour").reset_index()
 
+
+def attach_external(crashes, weather, flights):
+    """Left-join hourly weather/flights onto each crash and record whether a match was found."""
+    n = len(crashes)
+    if weather is not None:
+        crashes = crashes.merge(weather, on="hour", how="left")
+        cols = [c for c in ["temp_f", "precip_in", "wind_mph", "visibility_mi"] if c in crashes]
+        crashes["has_weather"] = crashes[cols].notna().any(axis=1).astype(int)
+        print(f"Weather matched for {crashes['has_weather'].mean():.1%} of crashes")
+    if flights is not None:
+        lo, hi = flights["hour"].min(), flights["hour"].max()
+        crashes = crashes.merge(flights, on="hour", how="left")
+        crashes["has_flights"] = crashes["hour"].between(lo, hi).astype(int)
+        print(f"Flight data covers {lo:%Y-%m-%d} to {hi:%Y-%m-%d}; {crashes['has_flights'].mean():.1%} of crashes fall inside")
+    assert len(crashes) == n, "an external join changed the number of crashes"
+    return crashes
+
+
+# ---------------------------------------------------------------- EDA
 def cramers_v(x, y):
     table = pd.crosstab(x, y)
     if min(table.shape) < 2:
@@ -266,100 +264,80 @@ def cramers_v(x, y):
 
 
 def make_hourly_panel(crashes, weather, flights):
-    # Keep zero-crash hours so outside datasets can be tested against crash occurrence.
+    """One row per hour, including zero-crash hours, so outside data can be tested against crash COUNTS."""
     hours = pd.date_range(START, pd.Timestamp(END_EXCLUSIVE) - pd.Timedelta(hours=1), freq="h")
     counts = crashes.groupby("hour").size().rename("crash_count").reindex(hours, fill_value=0)
     panel = counts.rename_axis("hour").reset_index()
     for external in [weather, flights]:
         if external is not None:
             panel = panel.merge(external, on="hour", how="left")
-    print("\nHourly panel flight-data diagnostics:")
-
-    for col in ["flight_departures", "mean_dep_delay_min",
-                "cancelled_flights"]:
-        if col in panel.columns:
-            print(
-                f"{col}: {panel[col].notna().sum():,} valid hours "
-                f"out of {len(panel):,}"
-            )
     return panel
 
 
+EDA_SKIP = OUTCOME_COLS | {"crash_record_id", "crash_date", "hour", "grid_id", "block_id", "year", "beat_of_occurrence",
+                           "has_weather", "has_flights"}
+
+
 def write_eda(crashes, panel):
+    """Screening associations use TRAINING years only, so the validation/test years stay untouched."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # Crash-level severity associations. Excludes injury outcome fields to prevent target leakage.
+    cut = pd.Timestamp(TRAIN_END)
+    screen = crashes[crashes["crash_date"] < cut] if (crashes["crash_date"] < cut).any() else crashes
+    screen_panel = panel[panel["hour"] < cut] if (panel["hour"] < cut).any() else panel
+    print(f"EDA screening uses {len(screen):,} crashes before {cut:%Y-%m-%d}")
     numeric_rows, categorical_rows = [], []
-    for col in crashes.columns:
-        if col in LEAKAGE or col in {"crash_record_id", "crash_date", "hour"}:
+    for col in screen.columns:
+        if col in EDA_SKIP:
             continue
-        if pd.api.types.is_numeric_dtype(crashes[col]):
-            valid = crashes[[col, "severe"]].dropna()
+        if pd.api.types.is_numeric_dtype(screen[col]):
+            valid = screen[[col, "severe"]].dropna()
             if valid[col].nunique() > 1 and valid["severe"].nunique() > 1:
                 r, p = pointbiserialr(valid["severe"], valid[col])
                 numeric_rows.append({"feature": col, "point_biserial_r": r, "p_value": p, "n": len(valid)})
-        elif crashes[col].nunique(dropna=True) <= 100:
-            valid = crashes[[col, "severe"]].dropna()
+        elif screen[col].nunique(dropna=True) <= 100:
+            valid = screen[[col, "severe"]].dropna()
             if len(valid) and valid[col].nunique() > 1:
                 categorical_rows.append({"feature": col, "cramers_v": cramers_v(valid[col], valid["severe"]), "n": len(valid)})
-                crashes.groupby(col, dropna=False)["severe"].agg(["count", "mean"]).rename(columns={"mean": "severe_rate"}).to_csv(OUT_DIR / f"severity_by_{col}.csv")
+                (screen.groupby(col, dropna=False)["severe"].agg(["count", "mean"])
+                 .rename(columns={"mean": "severe_rate"}).to_csv(OUT_DIR / f"severity_by_{col}.csv"))
     if numeric_rows:
-        pd.DataFrame(numeric_rows).sort_values("point_biserial_r", key=lambda s: s.abs(), ascending=False).to_csv(OUT_DIR / "severity_numeric_associations.csv", index=False)
-    else:
-        print("No numeric severity associations computed (no eligible numeric columns).")
+        (pd.DataFrame(numeric_rows).sort_values("point_biserial_r", key=lambda s: s.abs(), ascending=False)
+         .to_csv(OUT_DIR / "severity_numeric_associations.csv", index=False))
     if categorical_rows:
-        pd.DataFrame(categorical_rows).sort_values("cramers_v", ascending=False).to_csv(OUT_DIR / "severity_categorical_associations.csv", index=False)
-    else:
-        print("No categorical severity associations computed (no eligible categorical columns).")
-
-    # Crash occurrence associations use all hours, including hours with zero crashes.
+        (pd.DataFrame(categorical_rows).sort_values("cramers_v", ascending=False)
+         .to_csv(OUT_DIR / "severity_categorical_associations.csv", index=False))
     count_rows = []
-    for col in panel.select_dtypes(include="number").columns:
-        if col in {"crash_count"}:
+    for col in screen_panel.select_dtypes(include="number").columns:
+        if col == "crash_count":
             continue
-        valid = panel[[col, "crash_count"]].dropna()
+        valid = screen_panel[[col, "crash_count"]].dropna()
         if len(valid) > 2 and valid[col].nunique() > 1:
             r, p = spearmanr(valid[col], valid["crash_count"])
             count_rows.append({"feature": col, "spearman_r": r, "p_value": p, "n_hours": len(valid)})
     if count_rows:
-        pd.DataFrame(count_rows).sort_values("spearman_r", key=lambda s: s.abs(), ascending=False).to_csv(OUT_DIR / "hourly_crash_count_associations.csv", index=False)
+        (pd.DataFrame(count_rows).sort_values("spearman_r", key=lambda s: s.abs(), ascending=False)
+         .to_csv(OUT_DIR / "hourly_crash_count_associations.csv", index=False))
     else:
-        print("No hourly crash-count associations computed — add NOAA/BTS CSVs to data/noaa and data/bts to enable this.")
+        print("No hourly crash-count associations computed. Add NOAA/BTS CSVs to data/noaa and data/bts to enable this.")
     panel.to_csv(OUT_DIR / "hourly_crash_weather_flights.csv", index=False)
-    # Keep only the columns needed for crash severity modeling.
-    cleaned_columns = ["crash_date", "hour", "hour_of_day", "day_of_week", "month", "severe",
-    "posted_speed_limit", "latitude", "longitude", "weather_condition", "lighting_condition",
-    "roadway_surface_cond", "trafficway_type", "alignment", "traffic_control_device", 
-    "first_crash_type", "damage", "prim_contributory_cause"]
+    crashes.groupby(["year", "hour_of_day"]).size().rename("crash_count").to_csv(OUT_DIR / "crashes_by_year_hour.csv")
 
-    # Check that all requested columns exist.
-    missing_columns = [col for col in cleaned_columns if col not in crashes.columns]
-
-    if missing_columns:
-        raise ValueError(
-        f"Missing columns when saving cleaned crashes: {missing_columns}")
-
-    # Save only the selected columns.
-    cleaned_crashes = crashes[cleaned_columns].copy()
-
-    cleaned_crashes.to_csv(OUT_DIR / "cleaned_crashes.csv.gz",index=False, compression="gzip")
-
-    crashes.groupby([crashes["crash_date"].dt.year, 
-        crashes["hour_of_day"]]).size().rename("crash_count").to_csv(OUT_DIR / "crashes_by_year_hour.csv")
-
-    print(f"Cleaned crash file contains {len(cleaned_crashes.columns)} columns "
-    f"and {len(cleaned_crashes):,} records.")
-    print(f"EDA files written to {OUT_DIR.resolve()}")
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    raw = download_crashes()
-    crashes = clean_crashes(raw)
-    weather = read_noaa()
-    flights = read_bts()
+    crashes = clean_crashes(download_crashes())
+    weather, flights = read_noaa(), read_bts()
     panel = make_hourly_panel(crashes, weather, flights)
+    crashes = attach_external(crashes, weather, flights)
+    log("5. external data attached", crashes)
     write_eda(crashes, panel)
-    print(f"Crashes: {len(crashes):,}; severe share: {crashes['severe'].mean():.3%}")
+    crashes.to_csv(OUT_DIR / "cleaned_crashes.csv.gz", index=False)
+    pd.DataFrame(pre_log).to_csv(OUT_DIR / "preprocess_log.csv", index=False)
+    print(f"Crashes: {len(crashes):,}; severe (fatal/incapacitating) share: {crashes['severe'].mean():.3%}; "
+          f"any injury share: {crashes['any_injury'].mean():.3%}")
+    print(f"Wrote {OUT_DIR.resolve()}")
     print("Note: crash-level severity associations and hourly crash-count associations answer different questions.")
+
 
 if __name__ == "__main__":
     main()
