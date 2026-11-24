@@ -1,0 +1,15 @@
+# Data and generated outputs are rebuilt by the scripts; do not commit them.
+data/crash_cache/
+data/noaa/*
+data/bts/*
+!data/noaa/.gitkeep
+!data/bts/.gitkeep
+output/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+data/
+tests/
+src/
