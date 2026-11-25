@@ -1,15 +1,7 @@
-# Core (required). Tested with scikit-learn 1.9, pandas 3.0, numpy 2.5, matplotlib 3.11 on Python 3.12.
+# Core runtime dependencies; exact versions used are recorded in output/run_config.json.
 pandas>=2.0
 numpy>=1.24
 scipy>=1.10
 requests>=2.28
 scikit-learn>=1.4          # needed for HistGradientBoosting(categorical_features="from_dtype")
 matplotlib>=3.6
-
-# Optional models. Any that are not installed are skipped automatically and the run log says so.
-# These four were NOT tested in the environment where this code was written (no network), so run the
-# model smoke test after installing:  python -m unittest tests.test_pipeline.ModelSmoke -v
-xgboost>=2.0
-lightgbm>=4.0
-catboost>=1.2
-torch>=2.0                 # without it, "nn" falls back to scikit-learn's MLPClassifier

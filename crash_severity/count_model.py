@@ -1,11 +1,11 @@
 """Step 4: predict HOURLY CRASH COUNTS (how many crashes happen in a given hour).
 
-Reads output/hourly_crash_weather_flights.csv (made by crash_preprocess_eda.py).
+Reads output/hourly_crash_weather_flights.csv (made by crash_severity.preprocessing).
 If NOAA / BTS columns exist in that file they are used automatically; if not,
 the model runs on calendar features only, so you can run it today and re-run it
 after you add weather and flight data.
 
-Run from the repo root:  python model_crash_count.py
+Run from the repository root:  python -m crash_severity.count_model
 """
 from pathlib import Path
 import numpy as np

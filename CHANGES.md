@@ -15,6 +15,8 @@
 6. **More models:** random forest, XGBoost, LightGBM, CatBoost, neural net (PyTorch, or scikit-learn fallback) plus dummy and
    logistic baselines; random-search tuning on validation PR-AUC, seed averaging.
 7. **Calibration:** isotonic, fit on the validation period; Brier before/after is reported.
-8. **Risk map** (`risk_map.py`) validated on the held-out year against naive baselines; **8 figures** with auto-captions.
+8. **Risk map** (`crash_severity/risk_map.py`) validated on the held-out year against naive baselines; **8 figures** with auto-captions.
 9. **Housekeeping:** `requirements.txt`, `.gitignore` (data and outputs are no longer committed), tests, README rewritten,
-   `model_severity.py` replaced by `run_experiments.py`.
+   `model_severity.py` superseded by the main experiment runner; the old baseline is retained under `crash_severity/legacy/`.
+10. **Package layout.** Active analysis modules now live in `crash_severity/`; run the complete workflow with `python -m crash_severity`.
+    The separate hourly crash-count analysis remains available as `python -m crash_severity.count_model`.

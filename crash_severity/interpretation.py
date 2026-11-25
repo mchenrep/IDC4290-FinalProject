@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score
 
-from features import FEATURE_GROUPS
+from .features import FEATURE_GROUPS
 
 
 def _permute(X, cols, rng):

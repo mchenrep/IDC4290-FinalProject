@@ -1,4 +1,4 @@
-"""Model library. Every model has the same tiny interface:
+"""Model library. Every model has the same small interface:
 
     m = Model(cat, num, seed=0, **params)
     m.fit(X_train, y_train, X_val, y_val)     # X_* are DataFrames; categorical columns have pandas 'category' dtype

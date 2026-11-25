@@ -1,8 +1,8 @@
-"""Step 3-4: tune, train and compare models, test whether the extra datasets help, calibrate, interpret, build the risk map.
+"""Tune and compare severity models across the defined feature sets.
 
 Typical use
-    python run_experiments.py                  # full run on config.py's dates (2019-2024)
-    python run_experiments.py --fast           # quick smoke run (small training sample, tiny budgets)
+    python -m crash_severity.experiments
+    python -m crash_severity.experiments --fast
 
 Design rules (so the comparison is honest)
   * Chronological split: train < TRAIN_END <= validation < VAL_END <= test.
@@ -16,19 +16,18 @@ import argparse
 import json
 import platform
 import time
+from importlib.metadata import PackageNotFoundError, version
 
 import numpy as np
 import pandas as pd
-import sklearn
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import average_precision_score
 
-import config
-import risk_map
-from evaluate import bootstrap_ci, evaluate, paired_bootstrap_diff, pick_threshold
-from features import FEATURE_SETS, assert_no_leakage, resolve_feature_set
-from interpret import feature_and_group_importance
-from models import BASELINES, available_models, make_frames
+from . import config, risk_map
+from .evaluation import bootstrap_ci, evaluate, paired_bootstrap_diff, pick_threshold
+from .features import FEATURE_SETS, assert_no_leakage, resolve_feature_set
+from .interpretation import feature_and_group_importance
+from .models import BASELINES, available_models, make_frames
 
 FAST_OVERRIDES = {"rf": {"n_estimators": 60}}
 
@@ -90,6 +89,18 @@ def jsonable(obj):
     if isinstance(obj, (np.floating,)):
         return float(obj)
     return obj
+
+
+def dependency_versions():
+    packages = ("pandas", "numpy", "scipy", "scikit-learn", "matplotlib", "requests",
+                "xgboost", "lightgbm", "catboost", "torch")
+    versions = {}
+    for package in packages:
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = None
+    return versions
 
 
 def tune(cls, name, frames, y_tr, y_va, n_trials, cat, num):
@@ -230,13 +241,15 @@ def main():
                              config.OUT_DIR, seed=config.SEED)
         print(rv.to_string(index=False))
 
-    run_info = {"python": platform.python_version(), "sklearn": sklearn.__version__, "models_run": list(models),
+    run_info = {"python": platform.python_version(), "platform": platform.platform(),
+                "dependencies": dependency_versions(), "models_run": list(models),
                 "models_skipped_not_installed": skipped, "feature_sets_run": list(sets), "fast_mode": args.fast,
                 "n_trials": args.n_trials, "seeds": args.seeds, "n_boot": args.n_boot,
+                "input_manifest": "input_manifest.json",
                 "split": {"start": config.START, "train_end": config.TRAIN_END, "val_end": config.VAL_END,
                           "end": config.END_EXCLUSIVE}, "runtime_seconds": round(time.time() - t0)}
     (config.OUT_DIR / "run_config.json").write_text(json.dumps(run_info, indent=2))
-    print(f"Done in {run_info['runtime_seconds']}s. Next: python make_figures.py")
+    print(f"Done in {run_info['runtime_seconds']}s. Next: python -m crash_severity.figures")
 
 
 if __name__ == "__main__":

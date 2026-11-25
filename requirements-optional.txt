@@ -1,0 +1,5 @@
+# Optional model libraries. The pipeline skips unavailable models and logs them.
+xgboost>=2.0
+lightgbm>=4.0
+catboost>=1.2
+torch>=2.0

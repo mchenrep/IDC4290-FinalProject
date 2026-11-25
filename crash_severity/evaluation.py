@@ -1,4 +1,4 @@
-"""Metrics, thresholds and bootstrap confidence intervals."""
+"""Evaluation metrics, thresholds, and bootstrap confidence intervals."""
 import numpy as np
 from sklearn.metrics import (average_precision_score, brier_score_loss, confusion_matrix, precision_recall_curve,
                              roc_auc_score)

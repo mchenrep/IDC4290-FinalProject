@@ -1,4 +1,4 @@
-crash_date,hour_of_day,crash_count
+year,hour_of_day,crash_count
 2019,0,2348
 2019,1,1979
 2019,2,1826

@@ -1,4 +1,4 @@
-"""Step 1-2: download + clean Chicago crashes, add optional NOAA weather and BTS flight data, run EDA screening.
+"""Prepare crash and external datasets, then write exploratory association screens.
 
 Inputs (all optional except the crash download):
   data/noaa/*.csv   NOAA hourly Local Climatological Data (LCD) CSVs
@@ -8,6 +8,8 @@ Crash months are downloaded from the City API once and cached in data/crash_cach
 Outputs go to output/ (see README).
 """
 from datetime import timezone, timedelta
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -15,9 +17,9 @@ import pandas as pd
 import requests
 from scipy.stats import chi2_contingency, pointbiserialr, spearmanr
 
-from config import (BTS_DIR, CACHE_DIR, END_EXCLUSIVE, NOAA_DIR, NOAA_TIMES_ARE_LOCAL_STANDARD, OUT_DIR, START,
-                    TRAIN_END)
-from features import OUTCOME_COLS, add_location_features, add_time_features
+from .config import (BTS_DIR, CACHE_DIR, END_EXCLUSIVE, NOAA_DIR, NOAA_TIMES_ARE_LOCAL_STANDARD, OUT_DIR, START,
+                     TRAIN_END)
+from .features import OUTCOME_COLS, add_location_features, add_time_features
 
 CRASH_API = "https://data.cityofchicago.org/resource/85ca-t3if.json"
 PAGE_SIZE = 50_000
@@ -48,6 +50,45 @@ def log(step, df, note=""):
 # ---------------------------------------------------------------- crashes: download (with cache)
 def _month_cache_path(month_start):
     return CACHE_DIR / f"crashes_{month_start:%Y_%m}.csv"
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_input_manifest():
+    """Record source-file hashes so a later run can identify the exact input snapshot."""
+    sources = []
+    for label, folder in (("chicago_crashes", CACHE_DIR), ("noaa_weather", NOAA_DIR), ("bts_flights", BTS_DIR)):
+        files = []
+        for path in sorted(Path(folder).glob("*.csv")):
+            try:
+                display_path = str(path.relative_to(Path.cwd()))
+            except ValueError:
+                display_path = str(path.resolve())
+            files.append({"path": display_path, "bytes": path.stat().st_size, "sha256": file_sha256(path)})
+        sources.append({"dataset": label, "files": files})
+    root = Path(__file__).resolve().parents[1]
+    code_files = ("crash_severity/__init__.py", "crash_severity/__main__.py", "crash_severity/config.py",
+                  "crash_severity/features.py", "crash_severity/preprocessing.py",
+                  "crash_severity/models.py", "crash_severity/evaluation.py", "crash_severity/experiments.py",
+                  "crash_severity/interpretation.py", "crash_severity/risk_map.py", "crash_severity/figures.py",
+                  "crash_severity/pipeline.py", "crash_severity/count_model.py", "run_pipeline.py",
+                  "crash_severity/legacy/__init__.py", "crash_severity/legacy/model_severity.py",
+                  "requirements.txt", "requirements-optional.txt", "tests/test_pipeline.py")
+    code = {name: file_sha256(root / name) for name in code_files if (root / name).is_file()}
+    manifest = {
+        "chicago_crashes_dataset_id": "85ca-t3if",
+        "chicago_crashes_url": "https://data.cityofchicago.org/resource/85ca-t3if.json",
+        "date_range": {"start_inclusive": START, "end_exclusive": END_EXCLUSIVE},
+        "code_sha256": code,
+        "sources": sources,
+    }
+    (OUT_DIR / "input_manifest.json").write_text(json.dumps(manifest, indent=2))
 
 
 def _fetch_month(month_start, month_end):
@@ -205,17 +246,30 @@ def read_bts(folder=BTS_DIR):
     if not files:
         print("No BTS CSVs found; continuing without flight features.")
         return None
-    flights = pd.concat([pd.read_csv(f, low_memory=False) for f in files], ignore_index=True)
-    origin = first_existing(flights.columns, ["Origin", "ORIGIN"])
-    date_col = first_existing(flights.columns, ["FlightDate", "FL_DATE", "Flight Date"])
-    scheduled = first_existing(flights.columns, ["CRSDepTime", "CRS_DEP_TIME", "Scheduled departure time"])
-    delay = first_existing(flights.columns, ["DepDelay", "DEP_DELAY", "Departure delay"])
-    cancelled = first_existing(flights.columns, ["Cancelled", "CANCELLED", "Cancelled flag"])
-    if not all([origin, date_col, scheduled]):
-        raise ValueError("BTS files need Origin, flight date, and scheduled departure-time columns.")
-    flights = flights[flights[origin].astype(str).str.upper().eq("ORD")].copy()
-    dates = pd.to_datetime(flights[date_col], errors="coerce")
-    hhmm = pd.to_numeric(flights[scheduled], errors="coerce").fillna(-1).astype(int)
+    parts = []
+    for file in files:
+        columns = pd.read_csv(file, nrows=0).columns
+        mapping = {
+            "origin": first_existing(columns, ["Origin", "ORIGIN"]),
+            "flight_date": first_existing(columns, ["FlightDate", "FL_DATE", "Flight Date"]),
+            "scheduled": first_existing(columns, ["CRSDepTime", "CRS_DEP_TIME", "Scheduled departure time"]),
+            "delay": first_existing(columns, ["DepDelay", "DEP_DELAY", "Departure delay"]),
+            "cancelled": first_existing(columns, ["Cancelled", "CANCELLED", "Cancelled flag"]),
+        }
+        if not all(mapping[k] for k in ("origin", "flight_date", "scheduled")):
+            raise ValueError(f"BTS file needs origin, flight date, and scheduled departure-time columns: {file}")
+        selected = [column for column in mapping.values() if column is not None]
+        part = pd.read_csv(file, usecols=selected, low_memory=False).rename(
+            columns={column: name for name, column in mapping.items() if column is not None})
+        for name in ("delay", "cancelled"):
+            if name not in part:
+                part[name] = np.nan
+        parts.append(part[["origin", "flight_date", "scheduled", "delay", "cancelled"]])
+
+    flights = pd.concat(parts, ignore_index=True)
+    flights = flights[flights["origin"].astype(str).str.upper().eq("ORD")].copy()
+    dates = pd.to_datetime(flights["flight_date"], format="mixed", errors="coerce")
+    hhmm = pd.to_numeric(flights["scheduled"], errors="coerce").fillna(-1).astype(int)
     valid = (hhmm // 100).between(0, 24) & (hhmm % 100).between(0, 59) & dates.notna()
     flights, dates, hhmm = flights.loc[valid].copy(), dates.loc[valid], hhmm.loc[valid]
     flights["hour"] = (dates.dt.normalize() + pd.to_timedelta(hhmm // 100, unit="h")).dt.floor("h")   # 2400 -> next-day 00:00
@@ -223,9 +277,9 @@ def read_bts(folder=BTS_DIR):
     if flights.empty:
         print("No ORD departures in the configured date range; continuing without flight features.")
         return None
-    flights["dep_delay_min"] = pd.to_numeric(flights[delay], errors="coerce") if delay else np.nan
-    flights["cancelled_flag"] = pd.to_numeric(flights[cancelled], errors="coerce").fillna(0) if cancelled else 0
-    hourly = flights.groupby("hour").agg(flight_departures=(origin, "size"),
+    flights["dep_delay_min"] = pd.to_numeric(flights["delay"], errors="coerce")
+    flights["cancelled_flag"] = pd.to_numeric(flights["cancelled"], errors="coerce").fillna(0)
+    hourly = flights.groupby("hour").agg(flight_departures=("origin", "size"),
                                          mean_dep_delay_min=("dep_delay_min", "mean"),
                                          cancelled_flights=("cancelled_flag", "sum"))
     # hours inside the covered period with no departures are real zeros (not missing)
@@ -235,15 +289,26 @@ def read_bts(folder=BTS_DIR):
     return hourly.rename_axis("hour").reset_index()
 
 
+def lag_hourly_features(external, hours=1):
+    """Make a completed hourly observation available only in the following hour."""
+    if external is None:
+        return None
+    lagged = external.copy()
+    lagged["hour"] += pd.Timedelta(hours=hours)
+    return lagged
+
+
 def attach_external(crashes, weather, flights):
-    """Left-join hourly weather/flights onto each crash and record whether a match was found."""
+    """Join the previous complete hour of weather and flight data to each crash."""
     n = len(crashes)
     if weather is not None:
+        weather = lag_hourly_features(weather)
         crashes = crashes.merge(weather, on="hour", how="left")
         cols = [c for c in ["temp_f", "precip_in", "wind_mph", "visibility_mi"] if c in crashes]
         crashes["has_weather"] = crashes[cols].notna().any(axis=1).astype(int)
         print(f"Weather matched for {crashes['has_weather'].mean():.1%} of crashes")
     if flights is not None:
+        flights = lag_hourly_features(flights)
         lo, hi = flights["hour"].min(), flights["hour"].max()
         crashes = crashes.merge(flights, on="hour", how="left")
         crashes["has_flights"] = crashes["hour"].between(lo, hi).astype(int)
@@ -270,7 +335,7 @@ def make_hourly_panel(crashes, weather, flights):
     panel = counts.rename_axis("hour").reset_index()
     for external in [weather, flights]:
         if external is not None:
-            panel = panel.merge(external, on="hour", how="left")
+            panel = panel.merge(lag_hourly_features(external), on="hour", how="left")
     return panel
 
 
@@ -325,7 +390,9 @@ def write_eda(crashes, panel):
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    crashes = clean_crashes(download_crashes())
+    raw_crashes = download_crashes()
+    write_input_manifest()
+    crashes = clean_crashes(raw_crashes)
     weather, flights = read_noaa(), read_bts()
     panel = make_hourly_panel(crashes, weather, flights)
     crashes = attach_external(crashes, weather, flights)

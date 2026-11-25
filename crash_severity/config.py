@@ -1,7 +1,7 @@
 """Central settings for the whole pipeline.
 
 Every value can be overridden with an environment variable, which is handy for quick tests, e.g.
-    CRASH_END=2020-01-01 CRASH_TRAIN_END=2019-07-01 CRASH_VAL_END=2019-10-01 python run_experiments.py --fast
+    CRASH_END=2020-01-01 CRASH_TRAIN_END=2019-07-01 CRASH_VAL_END=2019-10-01 python -m crash_severity.experiments --fast
 """
 import os
 from pathlib import Path

@@ -9,11 +9,10 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import config
-import crash_preprocess_eda as pre
-from evaluate import paired_bootstrap_diff
-from features import (DETAIL_CAT, FEATURE_SETS, OUTCOME_COLS, assert_no_leakage)
-from models import available_models, make_frames
+from crash_severity import config, experiments as rx, preprocessing as pre
+from crash_severity.evaluation import paired_bootstrap_diff
+from crash_severity.features import DETAIL_CAT, FEATURE_SETS, OUTCOME_COLS, assert_no_leakage
+from crash_severity.models import available_models, make_frames
 
 
 def synthetic(n=6000, prevalence=0.08, seed=0):
@@ -61,7 +60,6 @@ class LeakageGuards(unittest.TestCase):
 
 class Splits(unittest.TestCase):
     def test_chronological_no_overlap(self):
-        import run_experiments as rx
         old = (config.TRAIN_END, config.VAL_END)
         config.TRAIN_END, config.VAL_END = "2019-03-01", "2019-04-01"
         try:
@@ -100,6 +98,16 @@ class ExternalData(unittest.TestCase):
         self.assertEqual(fl.loc["2019-01-15 01:00", "flight_departures"], 1)
         self.assertEqual(fl.loc["2019-01-15 02:00", "flight_departures"], 0)        # real zero, not missing
         self.assertEqual(fl.loc["2019-01-15 03:00", "cancelled_flights"], 1)        # ATL flight ignored
+
+    def test_external_features_use_the_previous_complete_hour(self):
+        crashes = pd.DataFrame({"hour": pd.to_datetime(["2019-01-15 02:00"])})
+        weather = pd.DataFrame({"hour": pd.to_datetime(["2019-01-15 01:00"]), "temp_f": [20.0]})
+        flights = pd.DataFrame({"hour": pd.to_datetime(["2019-01-15 01:00"]), "flight_departures": [7]})
+        joined = pre.attach_external(crashes, weather, flights)
+        self.assertEqual(joined.loc[0, "temp_f"], 20.0)
+        self.assertEqual(joined.loc[0, "flight_departures"], 7)
+        self.assertEqual(joined.loc[0, "has_weather"], 1)
+        self.assertEqual(joined.loc[0, "has_flights"], 1)
 
 
 class Evaluation(unittest.TestCase):

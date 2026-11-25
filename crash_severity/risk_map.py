@@ -11,7 +11,7 @@ from scipy.stats import spearmanr
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import GroupKFold
 
-from models import make_category_frame
+from .models import make_category_frame
 
 
 def run(pre, test, model_cls, params, cat, num, out_dir, seed=42, k=5):

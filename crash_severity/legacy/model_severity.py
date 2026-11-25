@@ -1,3 +1,4 @@
+"""Archived severity baseline; use ``python -m crash_severity.experiments`` instead."""
 from pathlib import Path
 import numpy as np
 import pandas as pd

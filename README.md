@@ -1,109 +1,95 @@
-# Chicago Traffic Crash Severity: Preprocessing, EDA, Modeling, Risk Map, Figures
+# Chicago Crash Severity Research Pipeline
 
-Pipeline for the IDC 4290 final project. It predicts whether a Chicago crash is **severe (fatal or incapacitating injury)**,
-tests whether **NOAA weather** and **O'Hare flight** data improve that prediction, and turns the predictions into a
-**grid-cell risk map** that is validated on a later, held-out period.
+An end-to-end, reproducible workflow for screening crash, weather, and flight data; comparing severity models; and producing paper-ready tables and figures. The primary outcome is severe injury **among reported crashes**, not whether a crash occurs.
 
-> **Important:** associations and feature importances describe prediction, not causation. Severity is modeled *given that a
-> crash was reported*; it is not exposure-adjusted crash risk.
+Associations and model importance are predictive, not causal. The pipeline produces analysis tables and figures for the team to interpret; it does not write paper conclusions.
 
-## Run order
+## Quick start
 
-```bash
-python -m venv .venv && source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
+Use Python 3.12 or newer. From the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-
-python -m unittest discover -s tests -v                  # 1. sanity tests (a minute at most)
-python crash_preprocess_eda.py                           # 2. download/clean/merge/EDA   -> output/cleaned_crashes.csv.gz etc.
-python run_experiments.py --fast                         # 3. quick smoke run (minutes)
-python run_experiments.py                                # 4. full run (default: 8 tuning trials, 5 seeds)
-python make_figures.py                                   # 5. paper figures + captions  -> output/figures/
+# Optional: install additional boosting/neural-net models
+python -m pip install -r requirements-optional.txt
+python -m unittest discover -s tests -v
+python -m crash_severity
 ```
 
-Run everything from the repository root. The first `crash_preprocess_eda.py` run downloads each month from the City API and
-caches it in `data/crash_cache/`; later runs are offline and fast.
+The full run may take a while. For a smoke run that skips the spatial analysis:
 
-## What each file does
+```powershell
+python -m crash_severity --fast --skip-risk-map
+```
 
-| File | Purpose |
+`python run_pipeline.py` remains available as a short compatibility launcher. `--fast` is for testing the workflow, not for final paper results. The full pipeline reads cached Chicago crash data when available, rebuilds preprocessing and EDA outputs, runs the model comparison, and generates figures. Set `CRASH_DATA_DIR` or `CRASH_OUT_DIR` to use alternate directories. Date and split overrides are in [crash_severity/config.py](./crash_severity/config.py).
+
+To select a smaller set of models or datasets:
+
+```powershell
+python -m crash_severity --models logreg hist_gb --feature-sets base base+weather base+flights
+```
+
+Optional models are used when installed: XGBoost, LightGBM, CatBoost, and PyTorch. Install them with `python -m pip install -r requirements-optional.txt`. The neural-net entry uses scikit-learn's MLP fallback when PyTorch is unavailable. The run log records models that were skipped.
+
+## Inputs and provenance
+
+The `data/` directory is intentionally git-ignored; it contains large source files and should be shared or downloaded separately.
+
+| Dataset | Expected files | Source and use |
+|---|---|---|
+| Chicago Traffic Crashes | Monthly CSVs in `data/crash_cache/` | [City of Chicago dataset 85ca-t3if](https://data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if). The pipeline fetches missing months and caches complete months. |
+| NOAA hourly weather | LCD CSVs in `data/noaa/` | [NOAA LCD archive](https://www.ncei.noaa.gov/data/local-climatological-data/access/). O'Hare station `USW00094846` is included in the supplied project data. |
+| BTS flight operations | Monthly on-time CSVs in `data/bts/` | [Bureau of Transportation Statistics TranStats](https://www.transtats.bts.gov/). The pipeline keeps ORD departures and reads only the needed columns. |
+
+NOAA and BTS are optional if unavailable, but feature sets requiring missing sources are skipped. Expected NOAA fields include `DATE`, `HourlyDryBulbTemperature`, `HourlyPrecipitation`, `HourlyWindSpeed`, `HourlyVisibility`, and `HourlyPresentWeatherType`. Expected BTS fields include flight date, origin, scheduled departure time, and (optionally) departure delay and cancellation status. The readers support common field-name variants; keep only the relevant monthly exports in each folder.
+
+Weather and flight measurements are shifted forward one hour before they are joined to crash records. Thus each crash uses the **previous completed hour**, rather than information accumulated later in the same hour. NOAA timestamps are treated as local standard time and converted to Chicago wall-clock time by default; confirm this matches the export before interpreting results (`NOAA_TIMES_ARE_LOCAL_STANDARD` in [crash_severity/config.py](./crash_severity/config.py)).
+
+Every preprocessing run writes `output/input_manifest.json`, containing file sizes and SHA-256 hashes for the exact source snapshot and analysis code, plus the Chicago dataset ID and analysis dates. `output/run_config.json` records Python, dependency versions, feature sets, model choices, split dates, and run settings. Preserve both files with shared results. Chicago's API can revise historical records, so matching the manifest is necessary to reproduce a particular result exactly.
+
+## Analysis design
+
+- **Target:** `severe = 1` for the exact categories `FATAL` or `INCAPACITATING INJURY`; otherwise 0. A missing injury label is currently counted as 0 (the count is printed during preprocessing); consider a sensitivity analysis excluding unknown labels. Outcome and injury-count fields are excluded from model inputs.
+- **Time split:** train through 2022, validation in 2023, held-out test in 2024. Override the dates in [crash_severity/config.py](./crash_severity/config.py) or with `CRASH_TRAIN_END`, `CRASH_VAL_END`, etc.
+- **Screening:** point-biserial correlation for numeric predictors and Cramér's V for categorical predictors against crash severity, using training years only. Hourly crash-count associations are reported separately. These are exploratory screens, not causal effects; p-values are unadjusted.
+- **Models:** prior baseline, logistic regression, random forest, scikit-learn histogram gradient boosting, plus installed optional boosting and neural-net models.
+- **Feature-set comparison:** base crash-time context; base plus NOAA; base plus BTS; base plus both; a no-location robustness set; and a separate post-crash-details set. The post-crash set is not a valid prospective prediction and must not be ranked against context-only sets as if it were.
+- **Selection and evaluation:** hyperparameters and the best context model are selected using train/validation data. Average precision (PR-AUC) is primary for the imbalanced target. Paired bootstrap intervals compare each feature set with `base` on the held-out test rows. ROC-AUC, recall at a fixed top-score budget, and Brier score are supplemental.
+- **Interpretation:** importance is permutation-based on validation data. It measures predictive contribution in this fitted model, not causation.
+
+## Outputs
+
+All generated files go under `output/` (ignored for new files; legacy tracked outputs may show changes when regenerated):
+
+| Output | Purpose |
 |---|---|
-| `config.py` | All dates, folders, split points and seeds (every value can be overridden by an environment variable) |
-| `features.py` | Time/location features, **feature-set definitions**, the leakage guard |
-| `crash_preprocess_eda.py` | Download (cached), clean, build the `severe` label, read NOAA/BTS, join to each crash, EDA screening |
-| `models.py` | Baselines + models: logistic regression, random forest, sklearn gradient boosting, XGBoost, LightGBM, CatBoost, neural net |
-| `evaluate.py` | PR-AUC, ROC-AUC, Brier, recall@top-5%, thresholds, bootstrap and **paired** bootstrap CIs |
-| `run_experiments.py` | Tuning, the models x feature-sets comparison, calibration, ablation vs base, importance, risk map |
-| `interpret.py` | Permutation importance per feature and per feature family (validation set) |
-| `risk_map.py` | Out-of-fold predictions -> calibrated grid-cell scores -> held-out validation vs naive baselines |
-| `make_figures.py` | 8 paper figures (PDF + 300-dpi PNG) and auto-generated captions with numbers taken from the result files |
-| `tests/test_pipeline.py` | Label regression test, leakage guards, split order, NOAA/BTS parsing, time zones, shuffled-label test, model smoke test |
+| `input_manifest.json`, `preprocess_log.csv` | Input snapshot hashes and preprocessing row counts |
+| `cleaned_crashes.csv.gz`, `hourly_crash_weather_flights.csv` | Joined crash table and hourly crash-count panel |
+| `severity_numeric_associations.csv`, `severity_categorical_associations.csv`, `hourly_crash_count_associations.csv` | Training-period association screens |
+| `model_results.csv`, `ablation_vs_base.csv`, `split_summary.csv`, `best_model.json`, `best_params.json`, `run_config.json` | Model comparison, uncertainty, selected configuration, and run metadata |
+| `perm_importance_features.csv`, `perm_importance_groups.csv` | Validation-set model interpretation |
+| `risk_cells.csv`, `risk_validation.csv` | Optional spatial ranking and held-out validation |
+| `figures/fig1...fig8` (`.pdf`, `.png`), `figures/captions.md` | Publication-ready figures and generated captions |
 
-## Target, split, and feature sets
+Use `ablation_vs_base.csv` to assess whether weather or flights improve test PR-AUC beyond the base set; a positive paired-bootstrap interval is evidence of improvement in this held-out period, not proof of a general effect. Use the `tier` column to keep post-crash details separate.
 
-- **Target `severe`** = most severe injury is exactly `FATAL` or `INCAPACITATING INJURY` (about 1.8% of crashes).
-  Also saved: `any_injury` and a 3-level `severity_class` (0 none, 1 other injury, 2 severe).
-- **Chronological split** (edit `config.py`): train 2019-2022, validation 2023, test 2024. Everything chosen (hyperparameters,
-  thresholds, calibration, "best model") uses train and validation only.
-- **Feature sets** (`features.py`):
-  - `base`: time, road/scene, speed limit, location, distance to O'Hare. Known before the crash.
-  - `base+weather`, `base+flights`, `base+weather+flights`: add NOAA / BTS features. Skipped automatically if the data is absent.
-  - `base_no_location`: robustness check (does the model learn conditions or just memorize places?).
-  - `context+details`: **post-crash tier.** Adds collision type, damage and contributory cause, which are recorded *after* the
-    crash. Report it separately; never mix it with the context-only results.
+## Project map
 
-## Input data
+| File | Responsibility |
+|---|---|
+| `crash_severity/pipeline.py` | One-command orchestration |
+| `crash_severity/config.py` | Data paths, date splits, geographic settings, seed |
+| `crash_severity/preprocessing.py` | Crash retrieval/cleaning, source integration, input manifest, exploratory screening |
+| `crash_severity/features.py` | Feature engineering, feature sets, leakage checks |
+| `crash_severity/models.py`, `crash_severity/evaluation.py` | Model implementations and metrics/uncertainty |
+| `crash_severity/experiments.py`, `crash_severity/interpretation.py`, `crash_severity/risk_map.py` | Model comparison, interpretation, optional spatial evaluation |
+| `crash_severity/figures.py` | Paper figures and captions |
+| `crash_severity/count_model.py` | Separate hourly crash-count analysis |
+| `crash_severity/legacy/` | Superseded severity baseline retained for reference |
+| `requirements.txt`, `requirements-optional.txt` | Core and optional model dependencies |
+| `tests/test_pipeline.py` | Focused checks for labels, leakage, data readers, time handling, and model behavior |
 
-### Chicago crashes: downloaded automatically
-Dataset `85ca-t3if` (Traffic Crashes - Crashes), month by month, for the dates in `config.py`. The City may update past
-records, so delete `data/crash_cache/` if you want a fresh pull.
-
-### NOAA hourly weather (optional)
-Download NOAA **Local Climatological Data (LCD)** hourly CSVs (start with O'Hare) and put them in `data/noaa/`. Used columns:
-`DATE`, `HourlyDryBulbTemperature`, `HourlyPrecipitation` (`T` = trace is handled), `HourlyWindSpeed`, `HourlyVisibility`,
-`HourlyPresentWeatherType` (turned into rain / snow / fog / freezing flags).
-
-**Time zone:** LCD timestamps are, to our knowledge, local *standard* time all year, while crash times are clock time. The
-script converts NOAA times to Chicago clock time (`NOAA_TIMES_ARE_LOCAL_STANDARD = True` in `config.py`). **Please confirm this
-for your export**; set it to `False` if your file is already in clock time.
-
-### BTS flights (optional)
-Put BTS **On-Time Performance** monthly CSVs in `data/bts/`. Needed columns: `Origin`, `FlightDate`, `CRSDepTime`;
-optional: `DepDelay`, `Cancelled`. Only ORD departures are used, per scheduled hour. Hours with no departures inside the
-covered period become real zeros; hours outside the covered period stay missing (`has_flights = 0`).
-
-If a folder is empty the pipeline continues without that dataset. Do not put unrelated CSVs in those folders.
-
-## Outputs (all in `output/`, git-ignored)
-
-- Data: `cleaned_crashes.csv.gz`, `hourly_crash_weather_flights.csv`, `preprocess_log.csv` (row counts per step)
-- EDA (training years only): `severity_*_associations.csv`, `severity_by_<field>.csv`, `hourly_crash_count_associations.csv`
-- Models: `model_results.csv`, `ablation_vs_base.csv`, `best_params.json`, `best_model.json`, `run_config.json`, `split_summary.csv`, `preds/*.npz`
-- Interpretation: `perm_importance_groups.csv`, `perm_importance_features.csv`
-- Risk map: `risk_cells.csv`, `risk_validation.csv`
-- Figures: `figures/fig1...fig8` (`.pdf` and `.png`) and `figures/captions.md`
-
-## How to read the key result files
-
-- **`ablation_vs_base.csv`** answers "do the extra datasets help?". Each row is a paired-bootstrap comparison of test PR-AUC
-  against `base` on the same rows. `verdict` is `improves` only if the 95% CI is entirely above zero.
-- **`model_results.csv`** has one row per model x feature set: PR-AUC with CI, lift over prevalence, ROC-AUC, recall in the
-  top 5% of scores, Brier score before/after calibration. `pr_auc_seed_sd` is the spread across random seeds.
-- **`risk_validation.csv`** shows what share of later severe crashes fall in the top 5% / 10% of cells, for the model and for two
-  naive baselines. If the model does not beat "rank by past crash count", say so in the paper.
-
-## Known limitations (put these in the paper)
-
-- Reporting bias: minor crashes are under-reported; severity is conditional on a reported crash.
-- Flights cover one airport; weather is one station (O'Hare), so it is a coarse proxy for conditions across the city.
-- Grid cells (about 0.5 km) stand in for street segments.
-- The `context+details` tier uses information recorded after the crash and answers a triage question, not a prediction one.
-- COVID-19 changed traffic in 2020 (inside the training years). Consider a sensitivity run that drops 2020.
-- Optional models (XGBoost, LightGBM, CatBoost, PyTorch) were written but could not be run where this code was developed;
-  run `python -m unittest tests.test_pipeline.ModelSmoke -v` after installing them.
-
-## Troubleshooting
-
-- **Connection/API error:** retry; finished months are cached, so only missing months are re-downloaded.
-- **No weather/flight features:** check the file location and column names (adjust the mappings in `read_noaa()` / `read_bts()`).
-- **"One of the splits is empty":** the split dates in `config.py` do not fall inside the downloaded date range.
-- **Slow run:** use `--fast`, or lower `--n-trials`, `--seeds`, `--n-boot`; run `--models hist_gb xgb lgbm` to limit models.
+The main workflow is organized by responsibility inside `crash_severity/`. To run the separate hourly crash-count analysis after preprocessing, use `python -m crash_severity.count_model`.

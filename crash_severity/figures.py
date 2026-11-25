@@ -1,6 +1,6 @@
 """Step 5: paper figures and auto-written captions, generated ONLY from files in output/.
 
-Run after run_experiments.py:   python make_figures.py
+Run after the model experiments:   python -m crash_severity.figures
 Writes PDF + PNG for every figure to output/figures/ and numbers-from-results captions to output/figures/captions.md.
 """
 import json
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix, precision_recall_curve
 
-import config
+from . import config
 
 OUT, FIG = config.OUT_DIR, config.FIG_DIR
 PALETTE = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F0E442", "#999999"]   # colorblind-safe

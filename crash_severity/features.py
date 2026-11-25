@@ -8,7 +8,7 @@ Every column is in exactly one role:
 import numpy as np
 import pandas as pd
 
-from config import CHICAGO_LAT, CHICAGO_LON, GRID_SIZE_DEG, BLOCK_SIZE_DEG, ORD_LAT, ORD_LON
+from .config import CHICAGO_LAT, CHICAGO_LON, GRID_SIZE_DEG, BLOCK_SIZE_DEG, ORD_LAT, ORD_LON
 
 # ---------------- Roles ----------------
 OUTCOME_COLS = {
