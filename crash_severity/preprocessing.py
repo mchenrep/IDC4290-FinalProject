@@ -264,9 +264,10 @@ def read_bts(folder=BTS_DIR):
         for name in ("delay", "cancelled"):
             if name not in part:
                 part[name] = np.nan
+        part = part[part["origin"].astype(str).str.upper().eq("ORD")]   # filter per file: files cover every US airport
         parts.append(part[["origin", "flight_date", "scheduled", "delay", "cancelled"]])
 
-    flights = pd.concat(parts, ignore_index=True)
+    flights = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["origin", "flight_date", "scheduled", "delay", "cancelled"])
     flights = flights[flights["origin"].astype(str).str.upper().eq("ORD")].copy()
     dates = pd.to_datetime(flights["flight_date"], format="mixed", errors="coerce")
     hhmm = pd.to_numeric(flights["scheduled"], errors="coerce").fillna(-1).astype(int)
