@@ -5,3 +5,4 @@ scipy>=1.10
 requests>=2.28
 scikit-learn>=1.4          # needed for HistGradientBoosting(categorical_features="from_dtype")
 matplotlib>=3.6
+statsmodels>=0.14        # factor_effects.py (odds ratios with clustered standard errors)

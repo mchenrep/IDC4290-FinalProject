@@ -49,10 +49,13 @@ def fig_eda(crashes):
     ax[1].bar(yr.index.astype(str), yr["mean"] * 100, color=PALETTE[0])
     ax[1].set(title="Severe share by year (%)", xlabel="Year", ylabel="% severe")
     peak = pivot.stack().idxmax()
+    n_cell = int(((crashes["day_of_week"] == peak[0]) & (crashes["hour_of_day"] == peak[1])).sum())
+    n_sev = int(crashes.loc[(crashes["day_of_week"] == peak[0]) & (crashes["hour_of_day"] == peak[1]), "severe"].sum())
     save(fig, "fig1_severity_patterns",
          f"Share of crashes with a fatal or incapacitating injury ({crashes['severe'].mean():.2%} overall, "
          f"{int(crashes['severe'].sum()):,} of {len(crashes):,} crashes). The highest cell is {peak[0]} at {peak[1]}:00 "
-         f"({pivot.stack().max():.1f}%). Left: hour by weekday; right: by year.")
+         f"({pivot.stack().max():.1f}%, based on {n_sev:,} severe of {n_cell:,} crashes; a small cell, so treat the peak as "
+         f"noisy). Left: hour by weekday; right: by year.")
 
 
 def fig_ablation(results, ablation):
@@ -178,11 +181,17 @@ def fig_risk():
     ax[2].legend(loc="lower right", fontsize=8)
     m = val[val["score"].str.startswith("model")].set_index("top_fraction_of_cells")
     b = val[val["score"].str.contains("severe count")].set_index("top_fraction_of_cells")
+    c = val[val["score"].str.contains("crash count")].set_index("top_fraction_of_cells")
+    gap = m.loc[0.10, "share_of_test_severe_captured"] - c.loc[0.10, "share_of_test_severe_captured"]
+    gap_text = (f"At the top 10% the model is {gap * 100:+.1f} percentage points versus the past-crash-count baseline"
+                f"{' (essentially tied; no uncertainty interval is computed)' if abs(gap) < 0.02 else ''}.")
     save(fig, "fig7_risk_map",
          f"Grid-cell risk map (cells of {config.GRID_SIZE_DEG} degrees). Ranked on pre-test data, the model's top 10% of cells contain "
          f"{m.loc[0.10, 'share_of_test_severe_captured']:.1%} of later severe crashes, versus {b.loc[0.10, 'share_of_test_severe_captured']:.1%} "
-         f"for ranking by past severe counts alone (random would be 10%). Spearman vs observed counts: "
-         f"{m.loc[0.10, 'spearman_vs_test_severe']:.2f} (model) vs {b.loc[0.10, 'spearman_vs_test_severe']:.2f} (past severe count).")
+         f"for ranking by past severe counts and {c.loc[0.10, 'share_of_test_severe_captured']:.1%} for ranking by past crash counts "
+         f"(random would be 10%). Spearman vs observed counts: {m.loc[0.10, 'spearman_vs_test_severe']:.2f} (model), "
+         f"{b.loc[0.10, 'spearman_vs_test_severe']:.2f} (past severe count), {c.loc[0.10, 'spearman_vs_test_severe']:.2f} (past crash count). "
+         f"{gap_text}")
 
 
 def fig_confusion(best, results):
